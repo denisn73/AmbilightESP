@@ -2,6 +2,7 @@
 Ambilight with ESP8266
 
 Software:
+
 1. Prismatik by Lightpack (last version beta 6.0.0)
 http://www.lightpack.tv/downloads.php
 
