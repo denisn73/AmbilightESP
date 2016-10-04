@@ -1,3 +1,5 @@
+
+#include <ESP8266WiFi.h>
 #include <NeoPixelBus.h>
 
 // Ardulight:
@@ -23,69 +25,130 @@
 // [11]  = Blue value of led[1]
 // [...] = etc for leds count
 
-#define USE_SERIAL Serial
 
-const uint16_t PixelCount = 4;
-const uint8_t  PixelPin = 2;
+const uint16_t PixelCount = 25;
 
-NeoPixelBus<NeoGrbFeature, NeoEsp8266BitBang800KbpsMethod> strip(PixelCount, PixelPin);
+
+#ifdef ESP8266
+  #define USE_TCP
+  #define USE_SERIAL Serial
+  const char* ssid = "NPMGroup-Guest";
+  const char* password = "";
+  NeoPixelBus<NeoRgbFeature, NeoEsp8266BitBang800KbpsMethod> strip(PixelCount, 13);
+  #ifdef USE_TCP
+    WiFiServer server(23);
+    WiFiClient serverClients[1];
+  #endif
+#else
+  #define USE_SERIAL Serial
+  NeoPixelBus<NeoRgbFeature, Neo800KbpsMethod> strip(PixelCount, A5);
+#endif
+
+unsigned int leds = 0;
+String inputString = "";
 
 void setup() {
-  #ifdef USE_SERIAL
-    USE_SERIAL.begin(115200);
-  #else
-  #endif
   strip.Begin();
   strip.Show();
+  #ifdef ESP8266
+    WiFi.begin(ssid);
+    while(WiFi.status() != WL_CONNECTED) {delay(500);}
+  #endif
+  #ifdef USE_SERIAL
+    USE_SERIAL.begin(115200);
+    #ifdef ESP8266 && USE_TCP
+      USE_SERIAL.print("Ready! Use 'telnet ");
+      USE_SERIAL.print(WiFi.localIP());
+      USE_SERIAL.println(" 23' to connect");
+    #endif
+  #endif
+  #ifdef USE_TCP
+    server.begin();
+    server.setNoDelay(true);
+  #endif
 }
 
 void loop() {
-  serialEvent();
+  #ifdef USE_SERIAL
+    serialEvent();
+  #endif
+  #ifdef USE_TCP
+    tcpEvent();
+  #endif
 }
 
-#ifdef USE_SERIAL
-bool new_string = false;
-bool getHighLeds = false;
-bool getLowLeds = false;
-unsigned int leds = 0;
-unsigned int ledIndex = 0;
-String inputString = "";
-void serialEvent() {
-  while(USE_SERIAL.available()) {
-    uint8_t cmd = USE_SERIAL.read();
-    if(!new_string) {
-      inputString += (char)cmd;
-      if(inputString.endsWith("Ada")) {
-        inputString = "";
-        getHighLeds = false;
-        getLowLeds  = false;
-        new_string  = true;
-        ledIndex    = 0;
-        leds        = 0;
-      }
-    } else if(!getHighLeds) {
-      leds = cmd;
-      leds = leds << 8;
-      getHighLeds = true;
-    } else if(!getLowLeds) {
-      leds |= cmd;
-      getLowLeds = true;
-    } else {
-      byte R = USE_SERIAL.read();
-      byte G = USE_SERIAL.read();
-      byte B = USE_SERIAL.read();
-      if(ledIndex < PixelCount) {
-        RgbColor RGB(R, G, B);
-        strip.SetPixelColor(ledIndex, RGB);
-      }
-      if(ledIndex!=leds) ledIndex++;
-      else {
-        strip.Show();
-        new_string = false;
+#ifdef USE_TCP
+void tcpEvent() {
+  if(server.hasClient()) {
+    //find free/disconnected spot
+    if(!serverClients[0] || !serverClients[0].connected()){
+      if(serverClients[0]) serverClients[0].stop();
+      serverClients[0] = server.available();
+    }
+    //no free/disconnected spot so reject
+    WiFiClient serverClient = server.available();
+    serverClient.stop();
+  }
+  //check clients for data
+  if(serverClients[0] && serverClients[0].connected()) {
+    if(serverClients[0].available()) {
+      //get data from the telnet client and push it to the UART
+      if(serverClients[0].available()) {
+        if(!inputString.endsWith("Ada")) {
+          inputString += (char) serverClients[0].read();
+        } else {
+          leds = serverClients[0].read();
+          leds = leds << 8;
+          while(!serverClients[0].available());
+          leds |= serverClients[0].read();
+          for(byte n=0; n<=leds; n++) {
+            byte RGB[3];
+            for(byte i=0;i<3;i++) {
+              while(!serverClients[0].available());
+              RGB[i] = serverClients[0].read();
+            }
+            RgbColor color(RGB[2], RGB[1], RGB[0]);
+            strip.SetPixelColor(n, color);
+          }
+          RgbColor color(0, 0, 0);
+          for(byte n=leds+1; n<PixelCount; n++) {
+            strip.SetPixelColor(n, color);
+          }
+          strip.Show();
+          inputString = "";
+        }
       }
     }
   }
 }
-#else
-void serialEvent(...);
+#endif
+
+#ifdef USE_SERIAL
+void serialEvent() {
+  if(USE_SERIAL.available()) {
+    if(!inputString.endsWith("Ada")) {
+      inputString += (char) USE_SERIAL.read();
+    } else {
+      leds = USE_SERIAL.read();
+      leds = leds << 8;
+      while(!USE_SERIAL.available());
+      leds |= USE_SERIAL.read();
+      for(byte n=0; n<=leds; n++) {
+        byte RGB[3];
+        for(byte i=0;i<3;i++) {
+          while(!USE_SERIAL.available());
+          RGB[i] = USE_SERIAL.read();
+        }
+        RgbColor color(RGB[2], RGB[1], RGB[0]);
+        strip.SetPixelColor(n, color);
+      }
+      RgbColor color(0, 0, 0);
+      for(byte n=leds+1; n<PixelCount; n++) {
+        strip.SetPixelColor(n, color);
+      }
+      strip.Show();
+      inputString = "";
+    }
+  }
+}
 #endif
