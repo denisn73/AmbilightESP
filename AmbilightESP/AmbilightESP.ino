@@ -2,6 +2,8 @@
 #include <ESP8266WiFi.h>
 #include <NeoPixelBus.h>
 
+// 192.168.89.58 : 23
+
 // Ardulight:
 //  FF 0C 15 29 58 6B 95 2F 3F 62
 //  FF 52 68 95 5C 6C 93 29 37 58
