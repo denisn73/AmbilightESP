@@ -1,196 +1,179 @@
-
-#include <ESP8266WiFi.h>
 #include <NeoPixelBus.h>
+#include <ESP8266WiFi.h>
 
-// 192.168.89.58 : 23
-
-// Ardulight:
-//  FF 0C 15 29 58 6B 95 2F 3F 62
-//  FF 52 68 95 5C 6C 93 29 37 58
-//  FF 52 68 95 5C 6C 93 29 39 59
-
-// Adalight
-//             [1][2][3][4][5][6][7][8][9][.][.][.][.][.][.]
-// one   led:  41 64 61 00 00 55 44 4B 58
-// two   leds: 41 64 61 00 01 54 44 4B 58 0A 0A 0A
-// three leds: 41 64 61 00 02 54 44 4B 58 0A 0A 0A 0A 0A 0A
-// [1]   = 41 - ??
-// [2]   = 64 - ??
-// [3]   = 61 - ??
-// [4]   = highByte of leds count 
-// [5]   = lowByte of leds count  (0 is 1 led, 1 is 2 leds,  etc...)
-// [6]   = Red value of led[0]
-// [7]   = Green value of led[0]
-// [8]   = Blue value of led[0]
-// [9]   = Red value of led[1]
-// [10]  = Green value of led[1]
-// [11]  = Blue value of led[1]
-// [...] = etc for leds count
-
-
-const uint16_t PixelCount = 25;
-
-
-#ifdef ESP8266
-  //#define USE_TCP
-  #define USE_FAST_TCP
-  #define USE_SERIAL Serial
-  const char* ssid = "NPMGroup-Guest";
-  const char* password = "";
-  NeoPixelBus<NeoRgbFeature, NeoEsp8266BitBang800KbpsMethod> strip(PixelCount, 13);
-  #ifdef USE_TCP || USE_FAST_TCP
-    
-    //WiFiClient serverClients[1];
-  #endif
-#else
-  NeoPixelBus<NeoRgbFeature, Neo800KbpsMethod> strip(PixelCount, A5);
-#endif
-#define USE_SERIAL Serial
 WiFiServer server(23);
-unsigned int leds = 0;
-String inputString = "";
+WiFiClient serverClients[1];
+
+#define pixelCount 20
+#define pixelPin   13
+const int SerialSpeed = 115200;
+
+NeoPixelBus<NeoRgbFeature, NeoEsp8266BitBang800KbpsMethod> strip(pixelCount, pixelPin);
+uint8_t*  pixelsPOINT = (uint8_t*)strip.Pixels();
+uint8_t prefix[] = {'A', 'd', 'a'}, hi, lo, chk, i; 
+uint16_t effectbuf_position = 0;
+enum mode { MODE_INITIALISE = 0, MODE_HEADER, MODE_CHECKSUM, MODE_DATA, MODE_SHOW, MODE_FINISH};
+mode state = MODE_INITIALISE;
+int effect_timeout = 0;
+uint8_t prefixcount = 0;
+unsigned long ada_sent = 0; 
+unsigned long pixellatchtime = 0; 
+const unsigned long serialTimeout = 15000; 
+long update_strip_time = 0; 
+
+void Adalight_Flash() {
+    for(uint16_t i = 0; i < strip.PixelCount(); i++) {
+      strip.SetPixelColor(i,RgbColor(255,0,0));
+    }
+    strip.Show(); 
+    delay(200);
+    for (uint16_t i = 0; i < strip.PixelCount(); i++) {
+      strip.SetPixelColor(i,RgbColor(0,255,0));
+    }
+    strip.Show();
+    delay(200);
+    for (uint16_t i = 0; i < strip.PixelCount(); i++) {
+      strip.SetPixelColor(i,RgbColor(0,0,255));
+    }
+    strip.Show();    
+    delay(200);
+    for (uint16_t i = 0; i < strip.PixelCount(); i++) {
+      strip.SetPixelColor(i,RgbColor(0,0,0));
+    }
+    strip.Show(); 
+}
+
+void Adalight () {
+
+  switch (state) {
+
+    case MODE_INITIALISE:
+      Serial.println("Begining of Adalight");
+      Adalight_Flash(); 
+      state = MODE_HEADER;
+
+    case MODE_HEADER:
+
+      effectbuf_position = 0; // reset the buffer position for DATA collection...
+
+          //if(Serial.available()) { // if there is serial available... process it... could be 1  could be 100....
+          if(serverClients[0].available()) {
+               
+            //for (int i = 0; i < Serial.available(); i++) {  // go through every character in serial buffer looking for prefix...
+            for (int i = 0; i < serverClients[0].available(); i++) {  // go through every character in serial buffer looking for prefix...
+
+              //if (Serial.read() == prefix[prefixcount]) { // if character is found... then look for next...
+              if (serverClients[0].read() == prefix[prefixcount]) { // if character is found... then look for next...
+                  prefixcount++;
+              } else prefixcount = 0;  //  otherwise reset....  ////
+
+            if (prefixcount == 3) {
+              effect_timeout = millis(); // generates START TIME.....
+              state = MODE_CHECKSUM; // Move on to next state
+              prefixcount = 0; // keeps track of prefixes found... might not be the best way to do this. 
+              break; 
+            } // end of if prefix == 3
+            
+            } // end of for loop going through serial....
+            //} else if (!Serial.available() && (ada_sent + 5000) < millis()) {
+            } else if (!serverClients[0].available() && (ada_sent + 5000) < millis()) {
+                  //Serial.print("Ada\n"); // Send "Magic Word" string to host every 5 seconds... 
+                  if(serverClients[0].connected()) serverClients[0].print("Ada\n"); // Send "Magic Word" string to host every 5 seconds... 
+                  ada_sent = millis(); 
+            }
+
+    break;
+
+    case MODE_CHECKSUM:
+
+        //if (Serial.available() >= 3) {
+        if (serverClients[0].available() >= 3) {
+          hi  = serverClients[0].read();
+          lo  = serverClients[0].read();
+          chk = serverClients[0].read();
+          //hi  = Serial.read();
+          //lo  = Serial.read();
+          //chk = Serial.read();
+          if(chk == (hi ^ lo ^ 0x55)) {
+            state = MODE_DATA;
+          } else {
+            state = MODE_HEADER; // ELSE RESET.......
+          }
+        }
+
+      if((effect_timeout + 1000) < millis()) state = MODE_HEADER; // RESET IF BUFFER NOT FILLED WITHIN 1 SEC.
+
+      break;
+
+    case MODE_DATA:
+
+        //while(Serial.available() && effectbuf_position < 3 * strip.PixelCount()) {   
+        while(serverClients[0].available() && effectbuf_position < 3 * strip.PixelCount()) {   
+          //pixelsPOINT[effectbuf_position++] = Serial.read(); 
+          pixelsPOINT[effectbuf_position++] = serverClients[0].read();
+        }
+
+      if(effectbuf_position >= 3*pixelCount) { // goto show when buffer has recieved enough data...
+        state = MODE_SHOW;
+        break;
+      } 
+
+      if((effect_timeout + 1000) < millis()) state = MODE_HEADER; // RESUM HEADER SEARCH IF BUFFER NOT FILLED WITHIN 1 SEC.
+      
+      break;
+
+    case MODE_SHOW:
+
+      strip.Dirty(); // MUST USE if you're using the direct buffer version... 
+      pixellatchtime = millis();
+      state = MODE_HEADER;
+      break;
+
+    case MODE_FINISH:
+
+    // nothing in here...
+    
+    break; 
+    }
+
+}
+
+void WiFiEvent(WiFiEvent_t event) {
+    switch(event) {
+        case WIFI_EVENT_STAMODE_GOT_IP:
+            Serial.println("WiFi connected");
+            Serial.print("IP address: ");
+            Serial.println(WiFi.localIP());
+            break;
+        case WIFI_EVENT_STAMODE_DISCONNECTED:
+            break;
+    }
+}
 
 void setup() {
-  strip.Begin();
-  strip.Show();
-  #ifdef ESP8266
-    WiFi.begin(ssid);
-    while(WiFi.status() != WL_CONNECTED) {delay(500);}
+    Serial.begin(SerialSpeed);
+    Serial.println();
+    strip.Begin();
+    strip.Show();
+    WiFi.onEvent(WiFiEvent);
+    WiFi.begin("NPMGroup-Guest");
     server.begin();
     server.setNoDelay(true);
-  #endif
-  #ifdef USE_SERIAL
-    USE_SERIAL.begin(115200);
-    USE_SERIAL.print("Ready! Use 'telnet ");
-    USE_SERIAL.print(WiFi.localIP());
-    USE_SERIAL.println(" 23' to connect");
-  #endif
 }
 
 void loop() {
-  if(USE_SERIAL.available()) dataEncode(USE_SERIAL.read());
-  //serialEvent();
-  #ifdef ESP8266
-  if(server.available()) dataEncode(server.read());
-  //tcpEvent();
-  #endif
+    if(millis() - update_strip_time > 30) {
+      strip.Show();
+      update_strip_time = millis();
+    };
+    tcp();
+    Adalight();
+    
 }
 
-char test[3];
-bool testAda(byte data) {
-  test[0] = test[1];
-  test[1] = test[2];
-  test[2] = (char)data;
-  if(test[0]=='A'&&test[0]=='d'&&test[0]=='a') return true;
-  return false;
+void tcp() {
+   if(server.hasClient()) {
+     serverClients[0] = server.available();
+   }
 }
 
-byte rgb_buf[3];
-bool getAda = false;
-byte getSize = 0;
-unsigned int buf_size = 0;
-unsigned int buf_index = 0;
-unsigned int rgb_index = 0;
-void dataEncode(byte data) {
-  if(!getAda) {
-    if(testAda(data)) getAda = true;
-  } else if(getSize<2) {
-    if(getSize==0) {
-      buf_size = data;
-    } else {
-      buf_size = buf_size << 8;
-      buf_size |= data;
-      buf_size = (buf_size+1)*3;
-    }
-    getSize++;
-  } else if(buf_index<buf_size) {
-    rgb_buf[rgb_index] = data;
-    rgb_index++;
-    if(rgb_index>=3) {
-      rgb_index = 0;
-      RgbColor color(rgb_buf[2], rgb_buf[1], rgb_buf[0]);
-      strip.SetPixelColor(buf_index/3, color);
-    }
-    buf_index++;
-  } else {
-    if((char)data=='A') strip.Show();
-    getAda = false;
-    testAda(data);
-  }  
-}
-
-//#ifdef USE_TCP
-//void tcpEvent() {
-//  if(server.hasClient()) {
-//    //find free/disconnected spot
-//    if(!serverClients[0] || !serverClients[0].connected()){
-//      if(serverClients[0]) serverClients[0].stop();
-//      serverClients[0] = server.available();
-//    }
-//    //no free/disconnected spot so reject
-//    WiFiClient serverClient = server.available();
-//    serverClient.stop();
-//  }
-//  //check clients for data
-//  if(serverClients[0] && serverClients[0].connected()) {
-//    if(serverClients[0].available()) {
-//      //get data from the telnet client and push it to the UART
-//      if(serverClients[0].available()) {
-//        if(!inputString.endsWith("Ada")) {
-//          inputString += (char) serverClients[0].read();
-//        } else {
-//          leds = serverClients[0].read();
-//          leds = leds << 8;
-//          while(!serverClients[0].available());
-//          leds |= serverClients[0].read();
-//          for(byte n=0; n<=leds; n++) {
-//            byte RGB[3];
-//            for(byte i=0;i<3;i++) {
-//              while(!serverClients[0].available());
-//              RGB[i] = serverClients[0].read();
-//            }
-//            RgbColor color(RGB[2], RGB[1], RGB[0]);
-//            strip.SetPixelColor(n, color);
-//          }
-//          RgbColor color(0, 0, 0);
-//          for(byte n=leds+1; n<PixelCount; n++) {
-//            strip.SetPixelColor(n, color);
-//          }
-//          strip.Show();
-//          inputString = "";
-//        }
-//      }
-//    }
-//  }
-//}
-//#endif
-
-//#ifdef USE_SERIAL
-//void serialEvent() {
-//  if(USE_SERIAL.available()) {
-//    if(!inputString.endsWith("Ada")) {
-//      inputString += (char) USE_SERIAL.read();
-//    } else {
-//      leds = USE_SERIAL.read();
-//      leds = leds << 8;
-//      while(!USE_SERIAL.available());
-//      leds |= USE_SERIAL.read();
-//      for(byte n=0; n<=leds; n++) {
-//        byte RGB[3];
-//        for(byte i=0;i<3;i++) {
-//          while(!USE_SERIAL.available());
-//          RGB[i] = USE_SERIAL.read();
-//        }
-//        RgbColor color(RGB[2], RGB[1], RGB[0]);
-//        strip.SetPixelColor(n, color);
-//      }
-//      RgbColor color(0, 0, 0);
-//      for(byte n=leds+1; n<PixelCount; n++) {
-//        strip.SetPixelColor(n, color);
-//      }
-//      strip.Show();
-//      inputString = "";
-//    }
-//  }
-//}
-//#endif
